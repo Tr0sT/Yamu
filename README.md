@@ -4,6 +4,24 @@
 (Model Context Protocol) server that enables AI coding agents to interact with
 Unity projects.
 
+## Installation
+
+### Install via Unity Package Manager (Git URL)
+
+1. Open Unity Editor
+2. Open **Window → Package Manager**
+3. Click the **+** button in the top-left corner
+4. Select **Add package from git URL...**
+5. Enter the following URL:
+   ```
+   https://github.com/Tr0sT/Yamu.git?path=/Packages/jp.keijiro.yamu
+   ```
+6. Click **Add**
+
+Unity will install the Yamu package directly from the GitHub repository.
+
+**Note**: Requires Unity 6000.0 or later.
+
 ## Features
 
 - `compile_and_wait` - Triggers Unity Editor compilation, waits for completion,
