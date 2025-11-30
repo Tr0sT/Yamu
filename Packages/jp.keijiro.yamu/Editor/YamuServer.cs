@@ -58,6 +58,7 @@ namespace Yamu
             public const string EditorStatus = "/editor-status";
             public const string McpSettings = "/mcp-settings";
             public const string CancelTests = "/cancel-tests";
+            public const string ConsoleLogs = "/console-logs";
         }
 
         public static class JsonResponses
@@ -138,6 +139,22 @@ namespace Yamu
         public string truncationMessage;
     }
 
+    [System.Serializable]
+    public class ConsoleLogEntry
+    {
+        public string message;
+        public string stackTrace;
+        public string logType;
+        public string timestamp;
+    }
+
+    [System.Serializable]
+    public class ConsoleLogsResponse
+    {
+        public int totalLogs;
+        public ConsoleLogEntry[] logs;
+    }
+
     // ============================================================================
     // MAIN HTTP SERVER CLASS
     // ============================================================================
@@ -195,6 +212,10 @@ namespace Yamu
 
         // Play mode state tracking (cached for thread-safe access)
         static bool _isPlaying = false;
+
+        // Console log tracking - no longer storing logs, reading from Unity on demand
+        static readonly object _consoleLogsLock = new object();
+        const int MaxConsoleLogEntries = 1000; // Limit returned logs to prevent response size issues
 
         static Server()
         {
@@ -285,6 +306,7 @@ namespace Yamu
             }
         }
 
+
         // ========================================================================
         // HTTP SERVER INFRASTRUCTURE
         // ========================================================================
@@ -337,6 +359,7 @@ namespace Yamu
                 Constants.Endpoints.EditorStatus => HandleEditorStatusRequest(),
                 Constants.Endpoints.McpSettings => HandleMcpSettingsRequest(),
                 Constants.Endpoints.CancelTests => HandleCancelTestsRequest(request),
+                Constants.Endpoints.ConsoleLogs => HandleConsoleLogsRequest(request),
                 _ => HandleNotFoundRequest(response)
             };
         }
@@ -618,6 +641,189 @@ namespace Yamu
             {
                 Debug.LogError($"[YamuServer] Error cancelling tests: {ex.Message}");
                 return $"{{\"status\":\"error\", \"message\":\"Failed to cancel tests: {ex.Message}\"}}";
+            }
+        }
+
+        static string HandleConsoleLogsRequest(HttpListenerRequest request)
+        {
+            if (YamuSettings.Instance.enableDebugLogs)
+            {
+                Debug.Log($"[YamuServer][Debug] Entering HandleConsoleLogsRequest");
+            }
+            try
+            {
+                var query = request.Url.Query ?? "";
+                var logTypeFilter = ExtractQueryParameter(query, "type");
+                var limitStr = ExtractQueryParameter(query, "limit");
+                var clearStr = ExtractQueryParameter(query, "clear");
+
+                int limit = 100; // Default limit
+                if (!string.IsNullOrEmpty(limitStr) && int.TryParse(limitStr, out int parsedLimit))
+                    limit = Math.Min(parsedLimit, MaxConsoleLogEntries);
+
+                bool clearLogs = clearStr == "true";
+
+                // Read logs on Unity main thread to ensure synchronization
+                ConsoleLogEntry[] logs = null;
+                bool operationComplete = false;
+
+                lock (_mainThreadActionQueue)
+                {
+                    _mainThreadActionQueue.Enqueue(() =>
+                    {
+                        try
+                        {
+                            logs = ReadConsoleLogsFromUnity(limit, logTypeFilter);
+                            if (clearLogs)
+                                ClearUnityConsole();
+                        }
+                        finally
+                        {
+                            operationComplete = true;
+                        }
+                    });
+                }
+
+                // Wait for main thread to complete the operation
+                var timeout = DateTime.Now.AddSeconds(5);
+                while (!operationComplete && DateTime.Now < timeout)
+                {
+                    Thread.Sleep(10);
+                }
+
+                if (!operationComplete || logs == null)
+                {
+                    return "{\"status\":\"error\", \"message\":\"Timeout reading console logs\"}";
+                }
+
+                var response = new ConsoleLogsResponse
+                {
+                    totalLogs = logs.Length,
+                    logs = logs
+                };
+
+                return JsonUtility.ToJson(response);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[YamuServer] Error getting console logs: {ex.Message}");
+                return $"{{\"status\":\"error\", \"message\":\"Failed to get console logs: {ex.Message}\"}}";
+            }
+        }
+
+        static ConsoleLogEntry[] ReadConsoleLogsFromUnity(int limit, string logTypeFilter)
+        {
+            try
+            {
+                // Use reflection to access Unity's internal LogEntries API
+                var logEntriesType = typeof(Editor).Assembly.GetType("UnityEditor.LogEntries");
+                var logEntryType = typeof(Editor).Assembly.GetType("UnityEditor.LogEntry");
+
+                if (logEntriesType == null || logEntryType == null)
+                    return new ConsoleLogEntry[0];
+
+                // Get methods for accessing logs
+                var getCountMethod = logEntriesType.GetMethod("GetCount", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                var startGettingEntriesMethod = logEntriesType.GetMethod("StartGettingEntries", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                var getEntryInternalMethod = logEntriesType.GetMethod("GetEntryInternal", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                var endGettingEntriesMethod = logEntriesType.GetMethod("EndGettingEntries", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+
+                if (getCountMethod == null || startGettingEntriesMethod == null ||
+                    getEntryInternalMethod == null || endGettingEntriesMethod == null)
+                    return new ConsoleLogEntry[0];
+
+                // Get LogEntry fields
+                var conditionField = logEntryType.GetField("condition");
+                var modeField = logEntryType.GetField("mode");
+                var messageField = logEntryType.GetField("message");
+
+                // Get count of logs in Unity console
+                var count = (int)getCountMethod.Invoke(null, null);
+
+                if (YamuSettings.Instance.enableDebugLogs)
+                {
+                    Debug.Log($"[YamuServer] ReadConsoleLogsFromUnity: Unity console has {count} logs");
+                }
+
+                if (count == 0)
+                    return new ConsoleLogEntry[0];
+
+                // Start getting entries
+                startGettingEntriesMethod.Invoke(null, null);
+
+                var resultLogs = new List<ConsoleLogEntry>();
+
+                // Read logs from Unity console
+                for (int i = 0; i < count && resultLogs.Count < limit; i++)
+                {
+                    var logEntry = Activator.CreateInstance(logEntryType);
+                    var parameters = new object[] { i, logEntry };
+
+                    var success = (bool)getEntryInternalMethod.Invoke(null, parameters);
+
+                    if (success)
+                    {
+                        logEntry = parameters[1];
+
+                        // Try both 'condition' and 'message' fields
+                        var condition = conditionField?.GetValue(logEntry) as string ?? "";
+                        var message = messageField?.GetValue(logEntry) as string ?? "";
+                        var mode = modeField != null ? (int)modeField.GetValue(logEntry) : 0;
+
+                        // Use whichever field has content
+                        var logMessage = !string.IsNullOrEmpty(condition) ? condition : message;
+
+                        // Mode values: 0 = Error, 1 = Assert, 2 = Log, 3 = Fatal, 4 = Warning, etc.
+                        string logType = mode switch
+                        {
+                            0 => "Error",
+                            1 => "Assert",
+                            2 => "Log",
+                            4 => "Warning",
+                            16 => "Exception",
+                            _ => "Log"
+                        };
+
+                        // Apply type filter if specified
+                        if (!string.IsNullOrEmpty(logTypeFilter) &&
+                            !logType.Equals(logTypeFilter, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var entry = new ConsoleLogEntry
+                        {
+                            message = logMessage,
+                            stackTrace = "", // Stack trace not available in LogEntry
+                            logType = logType,
+                            timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                        };
+
+                        resultLogs.Add(entry);
+                    }
+                }
+
+                // End getting entries
+                endGettingEntriesMethod.Invoke(null, null);
+
+                return resultLogs.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[YamuServer] Failed to read console logs from Unity: {ex.Message}");
+                return new ConsoleLogEntry[0];
+            }
+        }
+
+        static void ClearUnityConsole()
+        {
+            try
+            {
+                var logEntriesType = typeof(Editor).Assembly.GetType("UnityEditor.LogEntries");
+                var clearMethod = logEntriesType?.GetMethod("Clear", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+                clearMethod?.Invoke(null, null);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[YamuServer] Failed to clear Unity console: {ex.Message}");
             }
         }
 

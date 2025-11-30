@@ -19,6 +19,10 @@ Unity projects.
   file operations to ensure Unity detects file system changes (new/deleted/moved files)
 - `editor_status` - Gets current Unity Editor status including compilation state,
   test execution state, and play mode state for real-time monitoring
+- `tests_cancel` - Cancels running Unity test execution using Unity's TestRunnerApi.
+  Currently only supports EditMode tests
+- `get_console_logs` - Retrieves Unity console log messages including compilation
+  errors, Debug.Log messages, warnings, and errors with filtering options
 
 ## Configuration
 
@@ -34,6 +38,54 @@ Yamu provides configurable character limits for MCP server responses to prevent 
 - **Truncation Message**: Message appended to indicate content was cut off
 
 The system automatically calculates available space for content by subtracting MCP JSON overhead and truncation message length from the configured limit, ensuring maximum space is available for actual response content.
+
+### Server Port Configuration
+
+Yamu's HTTP server port is configurable, enabling multiple Unity Editor instances to run simultaneously without conflicts.
+
+**Configuration Location**: Assets → Editor → YamuSettings.asset
+
+**Setting**:
+- **Server Port**: HTTP server port (default: 17932)
+
+**Working with Multiple Unity Projects**:
+
+To work with multiple Unity Editor instances simultaneously:
+
+1. **Configure unique ports** for each Unity project:
+   - Project A: Set `serverPort: 17932` in YamuSettings
+   - Project B: Set `serverPort: 17933` in YamuSettings
+   - Project C: Set `serverPort: 17934` in YamuSettings
+
+2. **Configure MCP client** with multiple server instances:
+   ```json
+   {
+     "mcpServers": {
+       "Yamu-ProjectA": {
+         "command": "node",
+         "args": [
+           "path/to/ProjectA/Packages/jp.keijiro.yamu/Node/mcp-server.js",
+           "--port",
+           "17932"
+         ]
+       },
+       "Yamu-ProjectB": {
+         "command": "node",
+         "args": [
+           "path/to/ProjectB/Packages/jp.keijiro.yamu/Node/mcp-server.js",
+           "--port",
+           "17933"
+         ]
+       }
+     }
+   }
+   ```
+
+3. **Launch all Unity Editors** - each will listen on its configured port
+
+Each AI agent session can now interact with its corresponding Unity Editor independently, enabling parallel development across multiple Unity projects.
+
+**Important**: Port conflicts will prevent YamuServer from starting. Ensure each Unity Editor uses a unique port number.
 
 ## Purpose
 

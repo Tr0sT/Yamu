@@ -310,6 +310,30 @@ class MCPServer {
                         },
                         required: []
                     }
+                },
+                get_console_logs: {
+                    description: "Get Unity console log messages including compilation errors, Debug.Log messages, warnings, and errors. Returns console entries with message, stack trace, log type, and timestamp. LLM HINTS: Use type parameter to filter by log type (Log, Warning, Error, Assert, Exception). Use limit parameter to control number of returned logs (default 100, max 1000). Use clear=true to clear logs after reading.",
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            type: {
+                                type: "string",
+                                description: "Filter logs by type (optional). Valid values: Log, Warning, Error, Assert, Exception. If not provided, returns all log types.",
+                                default: ""
+                            },
+                            limit: {
+                                type: "number",
+                                description: "Maximum number of recent logs to return (default: 100, max: 1000). Returns most recent logs first.",
+                                default: 100
+                            },
+                            clear: {
+                                type: "boolean",
+                                description: "Clear console logs after reading (default: false). Useful for tracking new logs between requests.",
+                                default: false
+                            }
+                        },
+                        required: []
+                    }
                 }
             }
         };
@@ -403,6 +427,8 @@ class MCPServer {
                     return await this.callTestStatus(id);
                 case 'tests_cancel':
                     return await this.callTestsCancel(id, args.test_run_guid || '');
+                case 'get_console_logs':
+                    return await this.callGetConsoleLogs(id, args.type || '', args.limit || 100, args.clear || false);
                 default:
                     return {
                         jsonrpc: '2.0',
@@ -726,6 +752,73 @@ class MCPServer {
 
         } catch (error) {
             throw new Error(`Failed to cancel tests: ${error.message}`);
+        }
+    }
+
+    async callGetConsoleLogs(id, type = '', limit = 100, clear = false) {
+        try {
+            // Ensure response formatter is ready
+            await this.ensureResponseFormatter();
+
+            // Build the URL with query parameters
+            let url = '/console-logs';
+            const params = [];
+
+            if (type) {
+                params.push(`type=${encodeURIComponent(type)}`);
+            }
+            if (limit) {
+                params.push(`limit=${limit}`);
+            }
+            if (clear) {
+                params.push(`clear=true`);
+            }
+
+            if (params.length > 0) {
+                url += '?' + params.join('&');
+            }
+
+            // Call Unity console-logs endpoint
+            const logsResponse = await this.makeHttpRequest(url);
+
+            // Format the console logs for better readability
+            let formattedText = '';
+
+            if (logsResponse.logs && logsResponse.logs.length > 0) {
+                formattedText = `Unity Console Logs (${logsResponse.totalLogs} entries):\n\n`;
+
+                logsResponse.logs.forEach((log, index) => {
+                    formattedText += `[${log.timestamp}] [${log.logType}]\n`;
+                    formattedText += `${log.message}\n`;
+
+                    if (log.stackTrace && log.stackTrace.trim() !== '') {
+                        formattedText += `Stack trace:\n${log.stackTrace}\n`;
+                    }
+
+                    if (index < logsResponse.logs.length - 1) {
+                        formattedText += '\n---\n\n';
+                    }
+                });
+            } else {
+                formattedText = 'No console logs available.';
+            }
+
+            // Apply response formatting
+            const finalFormattedText = this.responseFormatter.formatResponse(formattedText);
+
+            return {
+                jsonrpc: '2.0',
+                id,
+                result: {
+                    content: [{
+                        type: 'text',
+                        text: finalFormattedText
+                    }]
+                }
+            };
+
+        } catch (error) {
+            throw new Error(`Failed to get console logs: ${error.message}`);
         }
     }
 
