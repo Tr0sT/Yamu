@@ -9,7 +9,5 @@
   "license": "Unlicense",
   "name": "jp.keijiro.yamu",
   "repository": "github:keijiro/Yamu",
-  "unity": "6000.0",
-  "unityRelease": "0f1",
-  "version": "1.0.2"
+  "version": "1.0.3"
 }

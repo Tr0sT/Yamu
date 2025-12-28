@@ -114,24 +114,15 @@ MCP.
 
 ## Prerequisites
 
-- **Platform**: macOS (only tested platform)
-- **Node.js**: Required to run the intermediate server
+- **Platform**: macOS (only tested platform; Windows support available but not extensively tested)
+- **Node.js**: Required to run the MCP server
   ```bash
   brew install node
   ```
 
-## Installation
+## Setup
 
-### 1. Install the Package
-
-You can install the Yamu package (`jp.keijiro.yamu`) via the "Keijiro" scoped
-registry using the Unity Package Manager. To add the registry to your project,
-follow [these instructions].
-
-[these instructions]:
-  https://gist.github.com/keijiro/f8c7e8ff29bfe63d86b888901b82644c
-
-### 2. Add the MCP Server to the AI Agent
+### Configure MCP Server for AI Agent
 
 You can either follow the steps in [`yamu-mcp-setup.md`] manually, or let the
 AI agent do it for you. For example, if you're using Gemini CLI:
