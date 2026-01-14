@@ -213,6 +213,8 @@ class MCPServer {
         this.unityServerUrl = `http://localhost:${port}`;
         this.configManager = new ConfigManager(this.unityServerUrl);
         this.responseFormatter = null; // Will be initialized after first config load
+        this.inputBuffer = '';
+        this.processing = Promise.resolve();
         this.capabilities = {
             tools: {
                 compile_and_wait: {
@@ -925,39 +927,96 @@ class MCPServer {
 
     start() {
         process.stdin.setEncoding('utf8');
-        process.stdin.on('readable', () => {
-            const chunk = process.stdin.read();
-            if (chunk !== null) {
-                this.processInput(chunk);
-            }
+        process.stdin.on('data', (chunk) => {
+            this.enqueueInput(chunk);
         });
 
         process.stdin.on('end', () => {
             process.exit(0);
         });
+
+        process.stdin.resume();
+    }
+
+    enqueueInput(chunk) {
+        this.inputBuffer += chunk;
+        this.processing = this.processing
+            .then(() => this.processBuffer())
+            .catch(() => {});
+    }
+
+    async processBuffer() {
+        while (true) {
+            const message = this.readNextMessage();
+            if (message === null) break;
+            await this.processInput(message);
+        }
+    }
+
+    readNextMessage() {
+        if (this.inputBuffer.length === 0) return null;
+
+        if (this.inputBuffer.startsWith('Content-Length:')) {
+            let headerEnd = this.inputBuffer.indexOf('\r\n\r\n');
+            let delimiterLength = 4;
+
+            if (headerEnd === -1) {
+                headerEnd = this.inputBuffer.indexOf('\n\n');
+                delimiterLength = 2;
+            }
+
+            if (headerEnd === -1) return null;
+
+            const header = this.inputBuffer.slice(0, headerEnd);
+            const match = header.match(/Content-Length:\s*(\d+)/i);
+
+            if (!match) {
+                return this.readNextLine();
+            }
+
+            const length = parseInt(match[1], 10);
+            if (Number.isNaN(length)) {
+                return this.readNextLine();
+            }
+
+            const messageStart = headerEnd + delimiterLength;
+            if (this.inputBuffer.length < messageStart + length) return null;
+
+            const message = this.inputBuffer.slice(messageStart, messageStart + length);
+            this.inputBuffer = this.inputBuffer.slice(messageStart + length);
+            return message;
+        }
+
+        return this.readNextLine();
+    }
+
+    readNextLine() {
+        const newlineIndex = this.inputBuffer.indexOf('\n');
+        if (newlineIndex === -1) return null;
+
+        const line = this.inputBuffer.slice(0, newlineIndex);
+        this.inputBuffer = this.inputBuffer.slice(newlineIndex + 1);
+        return line.replace(/\r$/, '');
     }
 
     async processInput(input) {
-        const lines = input.trim().split('\n');
+        const line = input.trim();
+        if (line === '') return;
 
-        for (const line of lines) {
-            if (line.trim() === '') continue;
-
-            try {
-                const request = JSON.parse(line);
-                const response = await this.handleRequest(request);
-                process.stdout.write(JSON.stringify(response) + '\n');
-            } catch (error) {
-                const errorResponse = {
-                    jsonrpc: '2.0',
-                    id: null,
-                    error: {
-                        code: -32700,
-                        message: 'Parse error'
-                    }
-                };
-                process.stdout.write(JSON.stringify(errorResponse) + '\n');
-            }
+        try {
+            const request = JSON.parse(line);
+            const response = await this.handleRequest(request);
+            process.stdout.write(JSON.stringify(response) + '\n');
+        } catch (error) {
+            const errorResponse = {
+                jsonrpc: '2.0',
+                id: null,
+                error: {
+                    code: -32700,
+                    message: 'Parse error'
+                }
+            };
+            process.stdout.write(JSON.stringify(errorResponse) + '\n');
         }
     }
 }
