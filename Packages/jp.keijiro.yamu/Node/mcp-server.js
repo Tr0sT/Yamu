@@ -214,6 +214,7 @@ class MCPServer {
         this.configManager = new ConfigManager(this.unityServerUrl);
         this.responseFormatter = null; // Will be initialized after first config load
         this.inputBuffer = '';
+        this.useContentLength = false;
         this.processing = Promise.resolve();
         this.capabilities = {
             tools: {
@@ -339,10 +340,26 @@ class MCPServer {
                 }
             }
         };
+        this.tools = this.capabilities.tools;
+        this.capabilities = {
+            tools: {
+                list: true,
+                call: true
+            },
+            resources: {
+                list: false,
+                read: false
+            },
+            prompts: {
+                list: false,
+                get: false
+            }
+        };
     }
 
     async handleRequest(request) {
         const { method, params, id } = request;
+        const isNotification = id === undefined || id === null;
 
         switch (method) {
             case 'initialize':
@@ -371,12 +388,22 @@ class MCPServer {
                     }
                 };
 
+            case 'initialized':
+                if (isNotification) {
+                    return null;
+                }
+                return {
+                    jsonrpc: '2.0',
+                    id,
+                    result: {}
+                };
+
             case 'tools/list':
                 return {
                     jsonrpc: '2.0',
                     id,
                     result: {
-                        tools: Object.entries(this.capabilities.tools).map(([name, tool]) => ({
+                        tools: Object.entries(this.tools).map(([name, tool]) => ({
                             name,
                             description: tool.description,
                             inputSchema: tool.inputSchema
@@ -388,6 +415,9 @@ class MCPServer {
                 return await this.handleToolCall(params, id);
 
             default:
+                if (isNotification) {
+                    return null;
+                }
                 return {
                     jsonrpc: '2.0',
                     id,
@@ -957,6 +987,7 @@ class MCPServer {
         if (this.inputBuffer.length === 0) return null;
 
         if (this.inputBuffer.startsWith('Content-Length:')) {
+            this.useContentLength = true;
             let headerEnd = this.inputBuffer.indexOf('\r\n\r\n');
             let delimiterLength = 4;
 
@@ -999,14 +1030,42 @@ class MCPServer {
         return line.replace(/\r$/, '');
     }
 
+    writeResponse(response) {
+        const json = JSON.stringify(response);
+        if (this.useContentLength) {
+            const byteLength = Buffer.byteLength(json, 'utf8');
+            safeStdoutWrite(`Content-Length: ${byteLength}\r\n\r\n${json}`);
+        } else {
+            safeStdoutWrite(json + '\n');
+        }
+    }
+
     async processInput(input) {
         const line = input.trim();
         if (line === '') return;
 
         try {
             const request = JSON.parse(line);
+
+            if (Array.isArray(request)) {
+                const responses = [];
+                for (const item of request) {
+                    const response = await this.handleRequest(item);
+                    if (item && item.id !== undefined && item.id !== null && response !== null && response !== undefined) {
+                        responses.push(response);
+                    }
+                }
+                if (responses.length > 0) {
+                    this.writeResponse(responses);
+                }
+                return;
+            }
+
             const response = await this.handleRequest(request);
-            process.stdout.write(JSON.stringify(response) + '\n');
+            if (request.id === undefined || request.id === null || response === null || response === undefined) {
+                return;
+            }
+            this.writeResponse(response);
         } catch (error) {
             const errorResponse = {
                 jsonrpc: '2.0',
@@ -1016,7 +1075,7 @@ class MCPServer {
                     message: 'Parse error'
                 }
             };
-            process.stdout.write(JSON.stringify(errorResponse) + '\n');
+            this.writeResponse(errorResponse);
         }
     }
 }
